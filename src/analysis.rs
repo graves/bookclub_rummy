@@ -890,40 +890,90 @@ impl Node {
     baseline: f64,
     draw_expected_score: f64,
     prob_analysis: &HandProbabilityAnalysis
-) -> AutoPlayDecision {
-    // Conservative: Only draw if the probability analysis strongly favors it
-    if prob_analysis.round_probabilities.len() > 1 {
-        let round_1 = &prob_analysis.round_probabilities[1];
+    ) -> AutoPlayDecision {
+        if prob_analysis.round_probabilities.len() > 1 {
+            let round_1 = &prob_analysis.round_probabilities[1];
         
-        // Conservative: Need very strong evidence that drawing is safe and beneficial
-        let risk_adjusted_improvement = round_1.expected_improvement - 
-            (round_1.risk_of_degradation * baseline * 2.0); // High risk penalty
+            // Conservative logic: depends heavily on current hand strength
+            let is_very_weak_hand = baseline < 5.0;
+            let is_weak_hand = baseline < 10.0;
+            let is_decent_hand = baseline >= 15.0;
         
-        let confidence_threshold = 0.8; // Need 80%+ chance of improvement
-        let min_improvement = baseline * 0.3; // Need 30%+ improvement to risk it
-        
-        if round_1.probability_of_improvement > confidence_threshold &&
-           risk_adjusted_improvement > min_improvement &&
-           round_1.risk_of_degradation < 0.15 { // Very low tolerance for loss risk
+            if is_very_weak_hand {
+                // Very weak hands (0-4 points): Conservative players will draw if improvement is likely
+                // They can't afford to play such weak hands
+                if round_1.probability_of_improvement > 0.6 && 
+                   round_1.expected_improvement > 1.0 &&
+                   round_1.risk_of_degradation < 0.3 {
+                
+                    let worst_card = self.find_worst_card_to_discard();
+                    return AutoPlayDecision {
+                        action: PlayAction::Draw,
+                        confidence: 0.7,
+                        expected_score: draw_expected_score,
+                        card_to_discard: Some(worst_card),
+                    };
+                }
+            } else if is_weak_hand {
+                // Weak hands (5-9 points): More selective, but still willing to improve
+                let risk_adjusted_improvement = round_1.expected_improvement - 
+                    (round_1.risk_of_degradation * baseline * 1.5);
             
-            let worst_card = self.find_worst_card_to_discard();
-            return AutoPlayDecision {
-                action: PlayAction::Draw,
-                confidence: 0.7,
-                expected_score: draw_expected_score,
-                card_to_discard: Some(worst_card),
-            };
+                if round_1.probability_of_improvement > 0.75 &&
+                   risk_adjusted_improvement > 2.0 &&
+                   round_1.risk_of_degradation < 0.2 {
+                
+                    let worst_card = self.find_worst_card_to_discard();
+                    return AutoPlayDecision {
+                        action: PlayAction::Draw,
+                        confidence: 0.6,
+                        expected_score: draw_expected_score,
+                        card_to_discard: Some(worst_card),
+                    };
+                }
+            } else if is_decent_hand {
+                // Decent hands (15+ points): Very conservative, only draw with excellent prospects
+                let risk_adjusted_improvement = round_1.expected_improvement - 
+                    (round_1.risk_of_degradation * baseline * 2.0);
+            
+                if round_1.probability_of_improvement > 0.8 &&
+                   risk_adjusted_improvement > baseline * 0.3 &&
+                   round_1.risk_of_degradation < 0.1 {
+                
+                    let worst_card = self.find_worst_card_to_discard();
+                    return AutoPlayDecision {
+                        action: PlayAction::Draw,
+                        confidence: 0.5,
+                        expected_score: draw_expected_score,
+                        card_to_discard: Some(worst_card),
+                    };
+                }
+            }
+            // Medium hands (10-14 points): Conservative players are happy to play these
+        } else {
+            // No probability data: Conservative players only draw very weak hands
+            if baseline < 3.0 {
+                let estimated_potential = self.estimate_hand_potential();
+                if estimated_potential > 2.0 {
+                    let worst_card = self.find_worst_card_to_discard();
+                    return AutoPlayDecision {
+                        action: PlayAction::Draw,
+                        confidence: 0.5,
+                        expected_score: baseline + estimated_potential * 0.5, // Conservative estimate
+                        card_to_discard: Some(worst_card),
+                    };
+                }
+            }
+        }
+
+        // Conservative default: Play the current hand
+        AutoPlayDecision {
+            action: PlayAction::Play,
+            confidence: 0.8,
+            expected_score: baseline,
+            card_to_discard: None,
         }
     }
-
-    // Conservative default: Play the current hand (bird in the hand)
-    AutoPlayDecision {
-        action: PlayAction::Play,
-        confidence: 0.8,
-        expected_score: baseline,
-        card_to_discard: None,
-    }
-}
 
     fn aggressive_decision(
         &self,

@@ -43,7 +43,7 @@ pub struct AutoPlayDecision {
 
 /// Creates and shuffles a standard 52-card deck.
 pub fn shuffle_deck() -> Result<VecDeque<Card>, String> {
-    use crate::card::{Name, Suite, ToName};
+    use crate::card::{Suite, ToName};
 
     let mut deck: Vec<Card> = [Suite::Spades, Suite::Hearts, Suite::Diamonds, Suite::Clubs]
         .iter()

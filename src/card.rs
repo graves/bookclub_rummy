@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Card {
