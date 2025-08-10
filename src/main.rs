@@ -1,8 +1,110 @@
-use std::io;
-use std::{collections::VecDeque, ops::Index};
+use std::collections::VecDeque;
+use std::io::{self, Write};
 
 use rand::seq::SliceRandom;
 use rummy::{analysis::*, card::*, game::*};
+
+struct GameState<'a> {
+    players: Vec<Player>,
+    deck: &'a mut Deck<'a>,
+    actions_log: Vec<String>,
+    messages: Vec<String>,
+    current_player_idx: usize,
+}
+
+impl<'a> GameState<'a> {
+    fn clear_screen() {
+        print!("\x1B[2J\x1B[1;1H"); // ANSI escape codes to clear screen and move cursor to top
+        io::stdout().flush().unwrap();
+    }
+
+    fn display(&self, human_player: &Player) {
+        Self::clear_screen();
+
+        // Header
+        println!("Today's Bookclub Rummy is on East of Eden by John Steinbeck\n");
+
+        // Player dialogue (random quotes or actual game dialogue)
+        for player in &self.players {
+            if player.player_type.is_some() {
+                let dialogue = self.get_player_dialogue(&player.name);
+                println!("{:20} says: {}", player.name, dialogue);
+            }
+        }
+        println!();
+
+        // Display discard pile and draw pile indicator
+        if let Some(top_card) = self.deck.discard_pile.back() {
+            println!("[{}] [⌧]", top_card);
+        } else {
+            println!("[--] [⌧]");
+        }
+
+        // Display human player's hand
+        print!(" ");
+        for card in &human_player.hand.cards {
+            print!("{} ", card);
+        }
+        println!("\n");
+
+        // Input prompt
+        print!("What do you want to do? ");
+        io::stdout().flush().unwrap();
+    }
+
+    fn display_with_actions(&self, human_player: &Player) {
+        self.display(human_player);
+
+        // Show recent actions
+        if !self.actions_log.is_empty() {
+            println!("\nActions:");
+            let start = self.actions_log.len().saturating_sub(3);
+            for action in &self.actions_log[start..] {
+                println!("{}", action);
+            }
+        }
+
+        // Show messages/errors
+        if !self.messages.is_empty() {
+            println!("\nMessages:");
+            for msg in &self.messages {
+                println!("{}", msg);
+            }
+        }
+    }
+
+    fn get_player_dialogue(&self, name: &str) -> &str {
+        match name {
+            "Socrates" => "I am not annoying to those who can annoy.",
+            "W.E.B. Du Bois" => "I invented sociology and nobody talks about it.",
+            "Thomas Sankara" => {
+                "If you forget what Burkina Faso means one more time, I'm making you move to Africa to continue the liberation of our women."
+            }
+            _ => "...",
+        }
+    }
+
+    fn add_action(&mut self, player_name: &str, action: &str, card: Option<Card>) {
+        let action_text = if let Some(card) = card {
+            format!("{:20} {} {}", player_name, action, card)
+        } else {
+            format!("{:20} {}", player_name, action)
+        };
+        self.actions_log.push(action_text);
+    }
+
+    fn add_message(&mut self, msg: String) {
+        self.messages.push(msg);
+        // Keep only last 3 messages
+        if self.messages.len() > 3 {
+            self.messages.remove(0);
+        }
+    }
+
+    fn clear_messages(&mut self) {
+        self.messages.clear();
+    }
+}
 
 fn main() {
     let mut shuffled_deck = shuffle_deck().unwrap();
@@ -10,6 +112,7 @@ fn main() {
         draw_pile: &mut shuffled_deck,
         discard_pile: &mut VecDeque::new(),
     };
+
     let player1 = Player {
         name: "Thomas Gentry".to_string(),
         player_type: None,
@@ -44,26 +147,40 @@ fn main() {
     players.shuffle(&mut rng);
 
     // Deal cards
-    let (players, deck) = deal_cards(players, &mut deck).unwrap();
+    let (mut players, mut deck) = deal_cards(players, &mut deck).unwrap();
+
     // Flip first discard card
     let visible_discard = deck.draw_pile.pop_back().unwrap();
     deck.discard_pile.push_back(visible_discard);
 
-    for mut player in players.clone() {
-        if let Some(player_type) = player.player_type {
-            let mut hand = player.hand.clone();
-            hand.cards.push(*deck.discard_pile.iter().last().unwrap());
+    let mut game_state = GameState {
+        players: players.clone(),
+        deck,
+        actions_log: Vec::new(),
+        messages: Vec::new(),
+        current_player_idx: 0,
+    };
+
+    // Main game loop
+    loop {
+        let current_player = &mut players[game_state.current_player_idx];
+
+        if let Some(player_type) = current_player.player_type {
+            // AI player turn
+            let mut hand = current_player.hand.clone();
+            hand.cards
+                .push(*game_state.deck.discard_pile.back().unwrap());
 
             let baseline_score = calculate_best_meld_from_hand(&hand);
+            let possible_cards: Vec<Card> = game_state.deck.draw_pile.iter().cloned().collect();
 
-            let possible_cards: Vec<Card> = deck.draw_pile.iter().cloned().collect::<Vec<Card>>();
             let node = Node {
                 full_hand: hand.clone(),
                 possible_hands: Vec::new(),
-                possible_cards: possible_cards,
-                discard_pile: deck.discard_pile.clone(),
+                possible_cards,
+                discard_pile: game_state.deck.discard_pile.clone(),
                 meld_score: None,
-                baseline_score: baseline_score,
+                baseline_score,
                 branches: Vec::new(),
                 depth: 0,
             };
@@ -71,200 +188,180 @@ fn main() {
             let prob_analysis = node.calculate_cumulative_probabilities();
             let decision = node.make_autoplay_decision(player_type, &prob_analysis);
 
-            let name = player.name;
-
             match decision.action {
                 PlayAction::Play => {
-                    println!("{name} → Will play current hand");
-                    let h = player.hand;
-                    println!("HAND: {h}");
+                    let score = calculate_best_meld_from_hand(&current_player.hand);
+                    game_state.add_action(&current_player.name, "played their hand!", None);
+                    println!(
+                        "\n{} played their hand with score: {}",
+                        current_player.name, score
+                    );
                     return;
                 }
                 PlayAction::Draw => {
-                    // Draw the actual card
-                    let drawn_card = deck.draw_pile.pop_back();
-                    if let Some(drawn_card) = drawn_card {
-                        player.hand.cards.push(drawn_card);
+                    // Draw card
+                    let drawn_card = if let Some(card) = game_state.deck.draw_pile.pop_back() {
+                        card
                     } else {
-                        deck.reshuffle_deck();
-                        let drawn_card = deck.draw_pile.pop_back().unwrap();
+                        game_state.deck.reshuffle_deck();
+                        game_state.deck.draw_pile.pop_back().unwrap()
+                    };
 
-                        player.hand.cards.push(drawn_card);
-                    }
+                    current_player.hand.cards.push(drawn_card);
 
-                    // NOW create node with the ACTUAL 6-card hand
-                    let actual_hand = player.hand.clone();
+                    // Find worst card to discard
+                    let actual_hand = current_player.hand.clone();
                     let node = Node {
                         full_hand: actual_hand,
                         possible_hands: Vec::new(),
-                        possible_cards: deck.draw_pile.iter().cloned().collect(),
-                        discard_pile: deck.discard_pile.clone(),
+                        possible_cards: game_state.deck.draw_pile.iter().cloned().collect(),
+                        discard_pile: game_state.deck.discard_pile.clone(),
                         meld_score: None,
-                        baseline_score: calculate_best_meld_from_hand(&player.hand),
+                        baseline_score: calculate_best_meld_from_hand(&current_player.hand),
                         branches: Vec::new(),
                         depth: 0,
                     };
 
-                    // Find worst card from ACTUAL hand
-                    let mut discard_card = node.find_worst_card_to_discard();
-
-                    let h = player.hand.clone();
-
-                    let idx = player
+                    let discard_card = node.find_worst_card_to_discard();
+                    let idx = current_player
                         .hand
                         .cards
                         .iter()
                         .position(|c| *c == discard_card)
                         .unwrap();
+                    let discarded = current_player.hand.cards.remove(idx);
+                    game_state.deck.discard_pile.push_back(discarded);
 
-                    discard_card = player.hand.cards.remove(idx);
-                    deck.discard_pile.push_back(discard_card);
-
-                    let action = ActionHistory {
-                        choice: Choice::Draw,
-                        card_to_discard: decision.card_to_discard.clone(),
-                    };
-
-                    player.actions.push_back(action);
+                    game_state.add_action(
+                        &current_player.name,
+                        "drew and discarded the",
+                        Some(discarded),
+                    );
                 }
             }
         } else {
-            let everyone_else = players.clone();
-            players.clone().retain(|p| *p == player);
+            // Human player turn
+            game_state.clear_messages();
+            game_state.display_with_actions(current_player);
 
-            World {
-                players: everyone_else,
-                you: player.clone(),
-            }
-            .print();
-
-            let mut player_choice: Option<Choice> = None;
-
+            let mut player_choice = None;
             while player_choice.is_none() {
-                player_choice = match parse_choice() {
-                    Ok(choice) => Some(choice),
+                let mut input = String::new();
+                io::stdin()
+                    .read_line(&mut input)
+                    .expect("Failed to read line");
+
+                match parse_choice(input.trim()) {
+                    Ok(choice) => player_choice = Some(choice),
                     Err(err) => {
-                        eprintln!("Error: {err}");
-                        None
+                        game_state.add_message(err);
+                        game_state.display_with_actions(current_player);
                     }
                 }
             }
 
-            match player_choice {
-                Some(Choice::Draw) => {
+            match player_choice.unwrap() {
+                Choice::Draw => {
                     // Draw card
-                    let drawn_card = deck.draw_pile.pop_back();
-                    if let Some(drawn_card) = drawn_card {
-                        player.hand.cards.push(drawn_card);
+                    let drawn_card = if let Some(card) = game_state.deck.draw_pile.pop_back() {
+                        card
                     } else {
-                        deck.reshuffle_deck();
-                        let drawn_card = deck.draw_pile.pop_back().unwrap();
+                        game_state.deck.reshuffle_deck();
+                        game_state.deck.draw_pile.pop_back().unwrap()
+                    };
 
-                        player.hand.cards.push(drawn_card);
-                    }
+                    current_player.hand.cards.push(drawn_card);
 
-                    let mut discard_choice = None;
-                    while discard_choice.is_none() {
-                        let h = player.hand.clone();
-                        println!("NEW HAND: {h}");
+                    // Show new hand and ask for discard
+                    game_state.clear_messages();
+                    game_state.display_with_actions(current_player);
+                    println!("\nWhich card would you like to discard?");
 
-                        discard_choice = match parse_discard() {
-                            Ok(discard) => Some(discard),
+                    let mut discard_card = None;
+                    while discard_card.is_none() {
+                        let mut input = String::new();
+                        io::stdin()
+                            .read_line(&mut input)
+                            .expect("Failed to read line");
+
+                        match Card::from_string(input.trim().to_string()) {
+                            Ok(card) => {
+                                if current_player.hand.cards.contains(&card) {
+                                    discard_card = Some(card);
+                                } else {
+                                    game_state.add_message("You don't have that card!".to_string());
+                                    game_state.display_with_actions(current_player);
+                                }
+                            }
                             Err(err) => {
-                                eprintln!("Error: {err}");
-                                None
+                                game_state.add_message(err);
+                                game_state.display_with_actions(current_player);
                             }
                         }
                     }
 
-                    let mut player_choice: Option<Choice> = None;
+                    let card = discard_card.unwrap();
+                    let idx = current_player
+                        .hand
+                        .cards
+                        .iter()
+                        .position(|c| *c == card)
+                        .unwrap();
+                    current_player.hand.cards.remove(idx);
+                    game_state.deck.discard_pile.push_back(card);
 
-                    while player_choice.is_none() {
-                        player_choice = match parse_choice() {
-                            Ok(choice) => Some(choice),
-                            Err(err) => {
-                                eprintln!("Error: {err}");
-                                None
+                    game_state.add_action(
+                        &current_player.name,
+                        "drew and discarded the",
+                        Some(card),
+                    );
+
+                    // Ask if they want to play or fold
+                    game_state.display_with_actions(current_player);
+                    println!("\nPlay (P) or Fold (F)?");
+
+                    loop {
+                        let mut input = String::new();
+                        io::stdin()
+                            .read_line(&mut input)
+                            .expect("Failed to read line");
+
+                        match input.trim().to_lowercase().as_str() {
+                            "p" | "play" => {
+                                let score = calculate_best_meld_from_hand(&current_player.hand);
+                                println!("\nYou played your hand with score: {}", score);
+                                return;
                             }
-                        }
-                    }
-
-                    let mut can_continue = false;
-                    while !can_continue {
-                        match player_choice {
-                            Some(Choice::Play) => {
-                                let meld_score = calculate_best_meld_from_hand(&player.hand);
-                                println!("You scored: {meld_score}");
-                                return (());
-                            }
-                            Some(Choice::Fold) => {
-                                let action = ActionHistory {
-                                    choice: Choice::Draw,
-                                    card_to_discard: discard_choice,
-                                };
-
-                                let mut discard_card = action.card_to_discard.unwrap();
-                                let idx = player
-                                    .hand
-                                    .cards
-                                    .iter()
-                                    .position(|c| *c == discard_card)
-                                    .unwrap();
-
-                                discard_card = player.hand.cards.remove(idx);
-                                deck.discard_pile.push_back(discard_card);
-
-                                player.actions.push_back(action);
-                                can_continue = true
-                            }
+                            "f" | "fold" => break,
                             _ => {
-                                eprintln!("Must draw or fold!");
+                                game_state
+                                    .add_message("Please enter P (play) or F (fold)".to_string());
+                                game_state.display_with_actions(current_player);
                             }
                         }
                     }
                 }
-                Some(Choice::Play) => {
-                    let discard_visible = deck.discard_pile.pop_back().unwrap();
-                    player.hand.cards.push(discard_visible);
-                    let meld_score = calculate_best_meld_from_hand(&player.hand);
-                    println!("You scored: {meld_score}");
-                    return (());
+                Choice::Play => {
+                    let discard_visible = game_state.deck.discard_pile.pop_back().unwrap();
+                    current_player.hand.cards.push(discard_visible);
+                    let score = calculate_best_meld_from_hand(&current_player.hand);
+                    println!("\nYou played your hand with score: {}", score);
+                    return;
                 }
-                _ => panic!("Unreachable code!"),
+                _ => {}
             }
         }
+
+        // Move to next player
+        game_state.current_player_idx = (game_state.current_player_idx + 1) % players.len();
     }
+}
 
-    fn parse_choice() -> Result<Choice, String> {
-        println!("\nWhat do you want to do? ");
-
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .expect("Failed to read line");
-
-        // Remove any trailing newline
-        let input = input.trim();
-
-        match input {
-            "D" | "d" => Ok(Choice::Draw),
-            "P" | "p" => Ok(Choice::Play),
-            "F" | "f" => Ok(Choice::Fold),
-            _ => Err("Invalid input. Expected D[d] or P[p].".into()),
-        }
-    }
-
-    fn parse_discard() -> Result<Card, String> {
-        println!("\nWhich card would you like to discard? ");
-
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .expect("Failed to read line");
-
-        // Remove any trailing newline
-        let input = input.trim().to_string();
-
-        Card::from_string(input)
+fn parse_choice(input: &str) -> Result<Choice, String> {
+    match input.to_lowercase().as_str() {
+        "d" | "draw" => Ok(Choice::Draw),
+        "p" | "play" => Ok(Choice::Play),
+        "f" | "fold" => Ok(Choice::Fold),
+        _ => Err("Invalid input. Expected D (draw) or P (play).".to_string()),
     }
 }
