@@ -266,10 +266,8 @@ impl ToU64 for Name {
     }
 }
 
-#[cfg(feature = "quickcheck")]
 use quickcheck::{Arbitrary, Gen};
 
-#[cfg(feature = "quickcheck")]
 impl Arbitrary for Card {
     fn arbitrary(g: &mut Gen) -> Self {
         let all_names = [

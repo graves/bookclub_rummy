@@ -14,10 +14,13 @@ pub struct Hand {
     pub cards: Vec<Card>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug)]
 pub struct Player {
     pub name: String,
+    pub player_type: Option<PlayerType>,
     pub hand: Hand,
+    pub actions: VecDeque<ActionHistory>,
+    pub dialogue: VecDeque<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -39,6 +42,48 @@ pub struct AutoPlayDecision {
     pub confidence: f64,
     pub expected_score: f64,
     pub card_to_discard: Option<Card>, // Which card to discard if drawing
+}
+
+#[derive(Clone, Debug)]
+pub struct ActionHistory {
+    pub choice: Choice,
+    pub card_to_discard: Option<Card>, // Which card to discard if drawing
+}
+
+pub struct World {
+    pub players: Vec<Player>,
+    pub you: Player,
+}
+
+#[derive(Clone, Debug)]
+pub enum Choice {
+    Draw,
+    Play,
+    Fold,
+}
+
+impl PartialEq for Player {
+    fn eq(&self, other: &Self) -> bool {
+        // Only compare the "name" field
+        self.name == other.name
+    }
+}
+
+impl World {
+    pub fn print(&self) {
+        let blank_drawn_card_chars = "";
+        let drawn_card_chars = " | Q♢";
+        let your_hand = &self.you.hand;
+
+        println!("Socrates says:       I am not annoying to those who can annoy.");
+        println!("W.E.B. Du Bois says: I invented sociology and nobody talks about it.");
+        println!(
+            "Thomas Sankara says: If you forget what Burkina Faso means one more time, I'm making you move to Africa to continue the liberation of our women."
+        );
+        println!("");
+        println!("[10♧] [⌧]");
+        println!("{your_hand}{blank_drawn_card_chars}")
+    }
 }
 
 /// Creates and shuffles a standard 52-card deck.
@@ -117,4 +162,17 @@ pub fn calculate_best_meld_from_hand(hand: &Hand) -> u64 {
     }
 
     best_score
+}
+
+impl<'a> Deck<'a> {
+    pub fn reshuffle_deck(&mut self) -> Result<(), String> {
+        let mut deck: Vec<Card> = (*self.discard_pile).clone().into();
+
+        deck.shuffle(&mut rng());
+
+        *self.draw_pile = VecDeque::from(deck);
+        *self.discard_pile = VecDeque::new();
+
+        Ok(())
+    }
 }

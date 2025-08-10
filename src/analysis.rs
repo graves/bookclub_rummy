@@ -81,6 +81,29 @@ pub struct PlayDecision {
     pub alternative_strategies: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct CombinedAnalysis {
+    optimal_round: usize,
+    confidence: f64,
+    details: DecisionAnalysis,
+}
+
+impl RoundProbabilities {
+    pub fn print_score_distribution(&self) {
+        println!("\nScore Distribution for Round {}:", self.round);
+        println!("Total paths evaluated: {}", self.total_simulations);
+
+        for outcome in &self.improvements {
+            let percentage = outcome.probability * 100.0;
+            let bar = "█".repeat((percentage / 2.0) as usize);
+            println!(
+                "  Score {:3}: {:6.2}% ({:5} paths) {}",
+                outcome.final_score, percentage, outcome.path_count, bar
+            );
+        }
+    }
+}
+
 pub fn evaluate_hand(node: &mut Node) -> Result<&mut Node, String> {
     // Pre-sort once and reuse - avoid repeated sorting
     node.full_hand.cards.sort_unstable(); // unstable is faster
@@ -91,7 +114,7 @@ pub fn evaluate_hand(node: &mut Node) -> Result<&mut Node, String> {
     let mut meld_scores = SmallVec::<[u64; 12]>::with_capacity(12); // Assuming 12 melds
 
     // Pre-calculate samples once for all iterations
-    let base_samples: Vec<_> = if node.depth < 2 {
+    let base_samples: Vec<_> = if node.depth < 3 {
         node.possible_cards.to_vec()
     } else {
         Vec::new()
@@ -127,7 +150,7 @@ pub fn evaluate_hand(node: &mut Node) -> Result<&mut Node, String> {
             node.discard_pile.push_back(discard);
 
             // Recursive branch evaluation with optimizations
-            if node.depth < 2 && !base_samples.is_empty() {
+            if node.depth < 3 && !base_samples.is_empty() {
                 evaluate_branches_parallel(
                     node,
                     &new_hand,
@@ -151,7 +174,7 @@ pub fn evaluate_branches(
 ) -> Result<(), String> {
     let mut rng = rng();
 
-    let sample_count = 27.min(available_samples.len());
+    let sample_count = 10.min(available_samples.len());
 
     // Early exit if no cards available
     if node.possible_cards.is_empty() {
@@ -214,9 +237,8 @@ pub fn evaluate_hand_parallel(node: &mut Node) -> Result<&mut Node, String> {
     node.full_hand.cards.sort_unstable();
     let hand_len = node.full_hand.cards.len();
     let mut new_hand = CardVec::with_capacity(hand_len - 1);
-    let mut meld_scores = SmallVec::<[u64; 12]>::with_capacity(12);
 
-    let base_samples: Vec<_> = if node.depth < 2 {
+    let base_samples: Vec<_> = if node.depth < 3 {
         node.possible_cards.to_vec()
     } else {
         Vec::new()
@@ -247,7 +269,7 @@ pub fn evaluate_hand_parallel(node: &mut Node) -> Result<&mut Node, String> {
         node.discard_pile.push_back(discard);
 
         // Continue exploring regardless of score
-        if node.depth < 2 && !base_samples.is_empty() {
+        if node.depth < 3 && !base_samples.is_empty() {
             if node.depth <= 1 {
                 evaluate_branches_parallel(
                     node,
@@ -279,7 +301,7 @@ pub fn evaluate_branches_parallel(
     max_meld_score: Option<u64>,
 ) -> Result<(), String> {
     let mut rng = rng();
-    let sample_count = 27.min(available_samples.len());
+    let sample_count = 10.min(available_samples.len());
 
     if node.possible_cards.is_empty() {
         return Ok(());
@@ -342,6 +364,374 @@ pub fn evaluate_branches_parallel(
 }
 
 impl Node {
+    // Create baseline round (round 0)
+    fn create_baseline_round(&self, baseline: u64) -> RoundProbabilities {
+        RoundProbabilities {
+            round: 0,
+            total_simulations: 1,
+            baseline_score: baseline,
+            improvements: vec![ImprovementOutcome {
+                final_score: baseline,
+                improvement: 0,
+                probability: 1.0,
+                path_count: 1,
+            }],
+            probability_of_improvement: 0.0,
+            expected_improvement: 0.0,
+            risk_of_degradation: 0.0,
+        }
+    }
+
+    /// Combine probabilities from multiple rounds
+    fn combine_round_probabilities(
+        &self,
+        round_1: &RoundProbabilities,
+        round_2: &RoundProbabilities,
+        round_3: &RoundProbabilities,
+        baseline: u64,
+    ) -> CombinedAnalysis {
+        // Calculate weighted expected values for each round
+        let round_1_ev =
+            round_1.expected_improvement - (round_1.risk_of_degradation * baseline as f64 * 0.5);
+        let round_2_ev =
+            round_2.expected_improvement - (round_2.risk_of_degradation * baseline as f64 * 0.6);
+        let round_3_ev =
+            round_3.expected_improvement - (round_3.risk_of_degradation * baseline as f64 * 0.7);
+
+        // Determine optimal stopping point
+        let optimal_round = if round_1_ev > round_2_ev && round_1_ev > 0.0 {
+            1
+        } else if round_2_ev > round_1_ev && round_2_ev > 0.0 {
+            2
+        } else if round_3_ev > round_2_ev && round_3_ev > 0.0 {
+            3
+        } else {
+            0
+        };
+
+        // Calculate confidence based on probability distributions
+        let confidence = if optimal_round == 0 {
+            0.8 // High confidence in playing current hand
+        } else {
+            let round = if optimal_round == 1 {
+                round_1
+            } else if optimal_round == 2 {
+                round_2
+            } else {
+                round_3
+            };
+            0.5 + (round.probability_of_improvement * 0.3)
+                + ((1.0 - round.risk_of_degradation) * 0.2)
+        };
+
+        CombinedAnalysis {
+            optimal_round,
+            confidence,
+            details: self.create_decision_analysis(round_1, round_2, round_3, baseline),
+        }
+    }
+
+    /// Create decision analysis for different player types
+    /// TODO
+    fn create_decision_analysis(
+        &self,
+        round_1: &RoundProbabilities,
+        round_2: &RoundProbabilities,
+        _round_3: &RoundProbabilities,
+        baseline: u64,
+    ) -> DecisionAnalysis {
+        let mut analysis = DecisionAnalysis::default();
+
+        // Conservative: High risk aversion
+        let conservative_1 =
+            round_1.expected_improvement - (round_1.risk_of_degradation * baseline as f64 * 1.0);
+        let conservative_2 =
+            round_2.expected_improvement - (round_2.risk_of_degradation * baseline as f64 * 1.2);
+
+        analysis.conservative_choice = if conservative_2 > conservative_1 && conservative_2 > 0.0 {
+            2
+        } else if conservative_1 > 0.0 {
+            1
+        } else {
+            0
+        };
+
+        // Aggressive: Low risk aversion, high upside focus
+        let aggressive_1 = round_1.expected_improvement
+            - (round_1.risk_of_degradation * baseline as f64 * 0.2)
+            + (round_1.probability_of_improvement * 5.0);
+        let aggressive_2 = round_2.expected_improvement
+            - (round_2.risk_of_degradation * baseline as f64 * 0.3)
+            + (round_2.probability_of_improvement * 7.0);
+
+        analysis.aggressive_choice = if aggressive_2 > aggressive_1 {
+            2
+        } else if aggressive_1 > 0.0 {
+            1
+        } else {
+            0
+        };
+
+        // Balanced: Moderate risk/reward
+        let balanced_1 = round_1.expected_improvement
+            - (round_1.risk_of_degradation * baseline as f64 * 0.5)
+            + (round_1.probability_of_improvement * 2.0);
+        let balanced_2 = round_2.expected_improvement
+            - (round_2.risk_of_degradation * baseline as f64 * 0.6)
+            + (round_2.probability_of_improvement * 3.0);
+
+        analysis.balanced_choice = if balanced_2 > balanced_1 && balanced_2 > 1.0 {
+            2
+        } else if balanced_1 > 0.5 {
+            1
+        } else {
+            0
+        };
+
+        analysis
+    }
+
+    /// Calculate probabilities considering full 2-round tree
+    pub fn calculate_cumulative_probabilities(&self) -> HandProbabilityAnalysis {
+        let baseline = self.baseline_score;
+
+        // Calculate probabilities for each round with proper path weighting
+        let round_1_probs = self.analyze_round_with_paths(1, baseline);
+        let round_2_probs = self.analyze_round_with_paths(2, baseline);
+        let round_3_probs = self.analyze_round_with_paths(3, baseline);
+
+        // Combine probabilities considering decision tree
+        let combined_analysis = self.combine_round_probabilities(
+            &round_1_probs,
+            &round_2_probs,
+            &round_3_probs,
+            baseline,
+        );
+
+        HandProbabilityAnalysis {
+            current_baseline: baseline,
+            round_probabilities: vec![
+                self.create_baseline_round(baseline),
+                round_1_probs,
+                round_2_probs,
+                round_3_probs,
+            ],
+            optimal_stop_round: Some(combined_analysis.optimal_round),
+            confidence_level: combined_analysis.confidence,
+            analysis_details: Some(combined_analysis.details),
+        }
+    }
+
+    /// Analyze a round considering all paths to that depth
+    fn analyze_round_with_paths(&self, target_depth: usize, baseline: u64) -> RoundProbabilities {
+        let mut path_outcomes: HashMap<u64, f64> = HashMap::new();
+        let mut total_probability = 0.0;
+        let mut total_paths = 0;
+
+        // Collect all paths to target depth with their probabilities
+        self.collect_weighted_paths(
+            0,
+            target_depth,
+            1.0, // Starting probability
+            &mut path_outcomes,
+            &mut total_probability,
+            &mut total_paths,
+        );
+
+        // Handle empty outcomes
+        if path_outcomes.is_empty() || total_probability == 0.0 {
+            return RoundProbabilities {
+                round: target_depth,
+                total_simulations: 0,
+                baseline_score: baseline,
+                improvements: vec![],
+                probability_of_improvement: 0.0,
+                expected_improvement: 0.0,
+                risk_of_degradation: 0.0,
+            };
+        }
+
+        // Normalize probabilities
+        let mut improvements: Vec<ImprovementOutcome> = path_outcomes
+            .into_iter()
+            .map(|(score, prob)| {
+                let normalized_prob = prob / total_probability;
+                ImprovementOutcome {
+                    final_score: score,
+                    improvement: score as i64 - baseline as i64,
+                    probability: normalized_prob,
+                    path_count: (prob * total_paths as f64) as usize, // Approximate path count
+                }
+            })
+            .collect();
+
+        // Sort by score (highest first)
+        improvements.sort_by(|a, b| b.final_score.cmp(&a.final_score));
+
+        let probability_of_improvement = improvements
+            .iter()
+            .filter(|o| o.improvement > 0)
+            .map(|o| o.probability)
+            .sum();
+
+        let expected_improvement = improvements
+            .iter()
+            .map(|o| o.improvement as f64 * o.probability)
+            .sum();
+
+        let risk_of_degradation = improvements
+            .iter()
+            .filter(|o| o.improvement < 0)
+            .map(|o| o.probability)
+            .sum();
+
+        RoundProbabilities {
+            round: target_depth,
+            total_simulations: (total_probability * total_paths as f64) as usize,
+            baseline_score: baseline,
+            improvements,
+            probability_of_improvement,
+            expected_improvement,
+            risk_of_degradation,
+        }
+    }
+
+    /// Collect paths with probability weighting
+    fn collect_weighted_paths(
+        &self,
+        current_depth: usize,
+        target_depth: usize,
+        current_probability: f64,
+        outcomes: &mut HashMap<u64, f64>,
+        total_prob: &mut f64,
+        total_paths: &mut usize,
+    ) {
+        if current_depth == target_depth {
+            // Add outcomes at target depth
+            if !self.possible_hands.is_empty() {
+                let mut score_distribution: HashMap<u64, usize> = HashMap::new();
+
+                let branch_prob = current_probability / self.possible_hands.len() as f64;
+                for possible_hand in &self.possible_hands {
+                    *score_distribution
+                        .entry(possible_hand.meld_score)
+                        .or_insert(0) += 1;
+                    *outcomes.entry(possible_hand.meld_score).or_insert(0.0) += branch_prob;
+                    *total_prob += branch_prob;
+                    *total_paths += 1;
+                }
+            } else {
+                *outcomes.entry(self.baseline_score).or_insert(0.0) += current_probability;
+                *total_prob += current_probability;
+                *total_paths += 1
+            }
+        } else if current_depth < target_depth {
+            if !self.branches.is_empty() {
+                let branch_prob = current_probability / self.branches.len() as f64;
+                for branch in &self.branches {
+                    branch.collect_weighted_paths(
+                        current_depth + 1,
+                        target_depth,
+                        branch_prob,
+                        outcomes,
+                        total_prob,
+                        total_paths,
+                    );
+                }
+            } else if !self.possible_hands.is_empty() {
+                // Terminal node before target depth - use possible hands
+                let branch_prob = current_probability / self.possible_hands.len() as f64;
+                for possible_hand in &self.possible_hands {
+                    *outcomes.entry(possible_hand.meld_score).or_insert(0.0) += branch_prob;
+                    *total_prob += branch_prob;
+                    *total_paths += 1;
+                }
+            } else {
+                // No branches or possible hands - use baseline
+                *outcomes.entry(self.baseline_score).or_insert(0.0) += current_probability;
+                *total_prob += current_probability;
+                *total_paths += 1;
+            }
+        }
+    }
+
+    /// Make decision considering full 3-round tree
+    pub fn make_multi_round_decision(
+        &self,
+        player_type: PlayerType,
+        prob_analysis: &HandProbabilityAnalysis,
+    ) -> AutoPlayDecision {
+        let baseline = prob_analysis.current_baseline as f64;
+
+        // Calculate value of drawing 1 card vs 2 cards
+        let draw_once_value = if prob_analysis.round_probabilities.len() > 1 {
+            self.calculate_draw_value(&prob_analysis.round_probabilities[1], baseline)
+        } else {
+            0.0
+        };
+
+        let draw_twice_value = if prob_analysis.round_probabilities.len() > 2 {
+            self.calculate_draw_value(&prob_analysis.round_probabilities[2], baseline)
+        } else {
+            0.0
+        };
+
+        let draw_thrice_value = if prob_analysis.round_probabilities.len() > 3 {
+            self.calculate_draw_value(&prob_analysis.round_probabilities[3], baseline)
+        } else {
+            0.0
+        };
+
+        // Adjust thresholds based on player type
+        let (draw_once_threshold, draw_twice_threshold, draw_thrice_threshold) = match player_type {
+            PlayerType::Conservative => (1.5, 3.0, 6.0),
+            PlayerType::Balanced => (0.5, 1.5, 3.0),
+            PlayerType::Aggressive => (-0.5, 0.5, 1.0),
+        };
+
+        // Decide based on which option provides best value
+        if draw_thrice_value > draw_twice_value && draw_thrice_value > draw_thrice_threshold {
+            // Plan to draw twice (but system only allows one at a time)
+            self.make_draw_decision(baseline + draw_thrice_value, 0.85)
+        } else if draw_twice_value > draw_once_value && draw_twice_value > draw_twice_threshold {
+            // Plan to draw twice (but system only allows one at a time)
+            self.make_draw_decision(baseline + draw_twice_value, 0.8)
+        } else if draw_once_value > draw_once_threshold {
+            // Draw once
+            self.make_draw_decision(baseline + draw_once_value, 0.75)
+        } else {
+            // Play current hand
+            AutoPlayDecision {
+                action: PlayAction::Play,
+                confidence: 0.7,
+                expected_score: baseline,
+                card_to_discard: None,
+            }
+        }
+    }
+
+    fn calculate_draw_value(&self, round: &RoundProbabilities, baseline: f64) -> f64 {
+        // Risk-adjusted expected value
+        let risk_penalty = round.risk_of_degradation * baseline * 0.5;
+        let upside_bonus = if round.probability_of_improvement > 0.5 {
+            round.expected_improvement * 0.2
+        } else {
+            0.0
+        };
+
+        round.expected_improvement - risk_penalty + upside_bonus
+    }
+
+    fn make_draw_decision(&self, expected_score: f64, confidence: f64) -> AutoPlayDecision {
+        let worst_card = self.find_worst_card_to_discard();
+        AutoPlayDecision {
+            action: PlayAction::Draw,
+            confidence,
+            expected_score,
+            card_to_discard: Some(worst_card),
+        }
+    }
+
     pub fn calculate_realistic_probabilities(&self) -> HandProbabilityAnalysis {
         let baseline = self.baseline_score;
 
@@ -886,87 +1276,117 @@ impl Node {
     }
 
     fn conservative_decision(
-    &self,
-    baseline: f64,
-    draw_expected_score: f64,
-    prob_analysis: &HandProbabilityAnalysis
+        &self,
+        baseline: f64,
+        _draw_expected_score: f64,
+        prob_analysis: &HandProbabilityAnalysis,
     ) -> AutoPlayDecision {
-        if prob_analysis.round_probabilities.len() > 1 {
-            let round_1 = &prob_analysis.round_probabilities[1];
-        
-            // Conservative logic: depends heavily on current hand strength
-            let is_very_weak_hand = baseline < 5.0;
-            let is_weak_hand = baseline < 10.0;
-            let is_decent_hand = baseline >= 15.0;
-        
-            if is_very_weak_hand {
-                // Very weak hands (0-4 points): Conservative players will draw if improvement is likely
-                // They can't afford to play such weak hands
-                if round_1.probability_of_improvement > 0.6 && 
-                   round_1.expected_improvement > 1.0 &&
-                   round_1.risk_of_degradation < 0.3 {
-                
-                    let worst_card = self.find_worst_card_to_discard();
-                    return AutoPlayDecision {
-                        action: PlayAction::Draw,
-                        confidence: 0.7,
-                        expected_score: draw_expected_score,
-                        card_to_discard: Some(worst_card),
-                    };
-                }
-            } else if is_weak_hand {
-                // Weak hands (5-9 points): More selective, but still willing to improve
-                let risk_adjusted_improvement = round_1.expected_improvement - 
-                    (round_1.risk_of_degradation * baseline * 1.5);
-            
-                if round_1.probability_of_improvement > 0.75 &&
-                   risk_adjusted_improvement > 2.0 &&
-                   round_1.risk_of_degradation < 0.2 {
-                
-                    let worst_card = self.find_worst_card_to_discard();
-                    return AutoPlayDecision {
-                        action: PlayAction::Draw,
-                        confidence: 0.6,
-                        expected_score: draw_expected_score,
-                        card_to_discard: Some(worst_card),
-                    };
-                }
-            } else if is_decent_hand {
-                // Decent hands (15+ points): Very conservative, only draw with excellent prospects
-                let risk_adjusted_improvement = round_1.expected_improvement - 
-                    (round_1.risk_of_degradation * baseline * 2.0);
-            
-                if round_1.probability_of_improvement > 0.8 &&
-                   risk_adjusted_improvement > baseline * 0.3 &&
-                   round_1.risk_of_degradation < 0.1 {
-                
-                    let worst_card = self.find_worst_card_to_discard();
-                    return AutoPlayDecision {
-                        action: PlayAction::Draw,
-                        confidence: 0.5,
-                        expected_score: draw_expected_score,
-                        card_to_discard: Some(worst_card),
-                    };
-                }
-            }
-            // Medium hands (10-14 points): Conservative players are happy to play these
+        // Analyze both rounds to make optimal decision
+        let round_1_analysis = if prob_analysis.round_probabilities.len() > 1 {
+            let r1 = &prob_analysis.round_probabilities[1];
+            Some((
+                r1.expected_improvement - (r1.risk_of_degradation * baseline * 1.0), // Conservative risk penalty
+                r1.probability_of_improvement,
+                r1.expected_improvement,
+            ))
         } else {
-            // No probability data: Conservative players only draw very weak hands
-            if baseline < 3.0 {
-                let estimated_potential = self.estimate_hand_potential();
-                if estimated_potential > 2.0 {
-                    let worst_card = self.find_worst_card_to_discard();
-                    return AutoPlayDecision {
-                        action: PlayAction::Draw,
-                        confidence: 0.5,
-                        expected_score: baseline + estimated_potential * 0.5, // Conservative estimate
-                        card_to_discard: Some(worst_card),
-                    };
+            None
+        };
+
+        let round_2_analysis = if prob_analysis.round_probabilities.len() > 2 {
+            let r2 = &prob_analysis.round_probabilities[2];
+            Some((
+                r2.expected_improvement - (r2.risk_of_degradation * baseline * 1.2), // Higher risk penalty for 2 draws
+                r2.probability_of_improvement,
+                r2.expected_improvement,
+            ))
+        } else {
+            None
+        };
+
+        let round_3_analysis = if prob_analysis.round_probabilities.len() > 3 {
+            let r3 = &prob_analysis.round_probabilities[3];
+            let risk_penalty = r3.risk_of_degradation * baseline * 0.6; // Slightly higher for 3 draws
+            Some((
+                r3.expected_improvement - risk_penalty,
+                r3.probability_of_improvement,
+                r3.expected_improvement,
+            ))
+        } else {
+            None
+        };
+
+        // Weight both options (60% weight on round 1, 40% on round 2, 30% on round 3 for balanced approach)
+        let (net_expected_value, best_prob, best_improvement, best_rounds) =
+            match (round_1_analysis, round_2_analysis, round_3_analysis) {
+                (
+                    Some((r1_val, r1_prob, r1_imp)),
+                    Some((r2_val, r2_prob, r2_imp)),
+                    Some((r3_val, r3_prob, r3_imp)),
+                ) => {
+                    let weighted_value = (r1_val * 0.6) + (r2_val * 0.4) + (r3_val * 0.3);
+                    if r3_val > (r1_val * 1.2 + r2_val * 1.2) {
+                        // Prefer round 3 if significantly better
+                        (r3_val, r3_prob, r3_imp, 2)
+                    } else if r2_val > r1_val * 1.2 {
+                        // Prefer round 2 if significantly better
+                        (r2_val, r2_prob, r2_imp, 2)
+                    } else {
+                        (weighted_value, r1_prob, r1_imp, 1)
+                    }
                 }
+                (Some((r1_val, r1_prob, r1_imp)), None, None) => (r1_val, r1_prob, r1_imp, 1),
+                _ => (0.0, 0.0, 0.0, 0),
+            };
+
+        // Conservative thresholds based on baseline and best available option
+        let should_draw = match baseline {
+            b if b == 0.0 => true, // No meld: always draw
+            b if b < 5.0 => {
+                // Very weak: draw unless terrible odds
+                net_expected_value > -0.5 || best_prob > 0.25
             }
+            b if b < 10.0 => {
+                // Weak: draw with any positive expectation
+                net_expected_value > 0.5 || (best_prob > 0.35)
+            }
+            b if b < 15.0 => {
+                // Medium-weak: draw with modest positive value
+                net_expected_value > 1.0 || (best_prob > 0.45)
+            }
+            b if b < 20.0 => {
+                // Medium: draw with good value
+                net_expected_value > 2.0 || (best_prob > 0.5 && best_improvement > 3.0)
+            }
+            _ => {
+                // Strong: draw with excellent value
+                net_expected_value > 3.0 || (best_prob > 0.6 && best_improvement > baseline * 0.2)
+            }
+        };
+
+        if should_draw && best_rounds > 0 {
+            let worst_card = self.find_worst_card_to_discard();
+            let expected_score = baseline + best_improvement;
+
+            return AutoPlayDecision {
+                action: PlayAction::Draw,
+                confidence: 0.6 + (best_prob * 0.3), // Scale confidence with probability
+                expected_score,
+                card_to_discard: Some(worst_card),
+            };
         }
 
-        // Conservative default: Play the current hand
+        // No probability data but very weak hand - still consider drawing
+        if prob_analysis.round_probabilities.is_empty() && baseline < 5.0 {
+            let worst_card = self.find_worst_card_to_discard();
+            return AutoPlayDecision {
+                action: PlayAction::Draw,
+                confidence: 0.5,
+                expected_score: baseline + 2.0,
+                card_to_discard: Some(worst_card),
+            };
+        }
+
         AutoPlayDecision {
             action: PlayAction::Play,
             confidence: 0.8,
@@ -975,54 +1395,120 @@ impl Node {
         }
     }
 
-    fn aggressive_decision(
+    fn balanced_decision(
         &self,
         baseline: f64,
-        draw_expected_score: f64,
-        prob_analysis: &HandProbabilityAnalysis
+        _draw_expected_score: f64,
+        prob_analysis: &HandProbabilityAnalysis,
     ) -> AutoPlayDecision {
-        if prob_analysis.round_probabilities.len() > 1 {
-            let round_1 = &prob_analysis.round_probabilities[1];
-        
-            // Aggressive: Low bar for drawing, focus on upside potential
-            let risk_adjusted_improvement = round_1.expected_improvement - 
-                (round_1.risk_of_degradation * baseline * 0.2); // Low risk penalty
-        
-            // Look at the maximum possible outcome, not just expected
-            let max_potential = round_1.improvements.first()
-                .map(|outcome| outcome.final_score as f64)
-                .unwrap_or(baseline);
-        
-            let upside_multiplier = if max_potential > baseline * 2.0 { 1.5 } else { 1.0 };
-        
-            // Aggressive: Draw if any reasonable chance of improvement
-            if round_1.probability_of_improvement > 0.25 || // Low threshold for improvement chance
-               risk_adjusted_improvement * upside_multiplier > 0.0 || // Any positive expected value
-               max_potential > baseline * 1.8 { // High upside potential available
-            
-                let worst_card = self.find_worst_card_to_discard();
-                return AutoPlayDecision {
-                    action: PlayAction::Draw,
-                    confidence: 0.8,
-                    expected_score: draw_expected_score,
-                    card_to_discard: Some(worst_card),
-                };
-            }
+        // Analyze both rounds with balanced risk assessment
+        let round_1_analysis = if prob_analysis.round_probabilities.len() > 1 {
+            let r1 = &prob_analysis.round_probabilities[1];
+            let risk_penalty = r1.risk_of_degradation * baseline * 0.4; // Moderate risk penalty
+            Some((
+                r1.expected_improvement - risk_penalty,
+                r1.probability_of_improvement,
+                r1.expected_improvement,
+            ))
         } else {
-            // No probability data: aggressive players assume drawing is worth it unless baseline is excellent
-            let estimated_improvement_potential = self.estimate_hand_potential();
-            if estimated_improvement_potential > baseline * 0.5 {
-                let worst_card = self.find_worst_card_to_discard();
-                return AutoPlayDecision {
-                    action: PlayAction::Draw,
-                    confidence: 0.6,
-                    expected_score: baseline + estimated_improvement_potential,
-                    card_to_discard: Some(worst_card),
-                };
+            None
+        };
+
+        let round_2_analysis = if prob_analysis.round_probabilities.len() > 2 {
+            let r2 = &prob_analysis.round_probabilities[2];
+            let risk_penalty = r2.risk_of_degradation * baseline * 0.5; // Slightly higher for 2 draws
+            Some((
+                r2.expected_improvement - risk_penalty,
+                r2.probability_of_improvement,
+                r2.expected_improvement,
+            ))
+        } else {
+            None
+        };
+
+        let round_3_analysis = if prob_analysis.round_probabilities.len() > 3 {
+            let r3 = &prob_analysis.round_probabilities[3];
+            let risk_penalty = r3.risk_of_degradation * baseline * 0.6; // Slightly higher for 3 draws
+            Some((
+                r3.expected_improvement - risk_penalty,
+                r3.probability_of_improvement,
+                r3.expected_improvement,
+            ))
+        } else {
+            None
+        };
+
+        // Weight both options (60% weight on round 1, 40% on round 2, 30% on round 3 for balanced approach)
+        let (net_expected_value, best_prob, best_improvement, best_rounds) =
+            match (round_1_analysis, round_2_analysis, round_3_analysis) {
+                (
+                    Some((r1_val, r1_prob, r1_imp)),
+                    Some((r2_val, r2_prob, r2_imp)),
+                    Some((r3_val, r3_prob, r3_imp)),
+                ) => {
+                    let weighted_value = (r1_val * 0.6) + (r2_val * 0.4) + (r3_val * 0.3);
+                    if r3_val > (r1_val * 1.2 + r2_val * 1.2) {
+                        // Prefer round 3 if significantly better
+                        (r3_val, r3_prob, r3_imp, 2)
+                    } else if r2_val > r1_val * 1.2 {
+                        // Prefer round 2 if significantly better
+                        (r2_val, r2_prob, r2_imp, 2)
+                    } else {
+                        (weighted_value, r1_prob, r1_imp, 1)
+                    }
+                }
+                (Some((r1_val, r1_prob, r1_imp)), None, None) => (r1_val, r1_prob, r1_imp, 1),
+                _ => (0.0, 0.0, 0.0, 0),
+            };
+
+        // Balanced thresholds considering three rounds
+        let should_draw = match baseline {
+            b if b == 0.0 => true, // No meld: always draw
+            b if b < 5.0 => {
+                // Very weak: draw unless terrible odds
+                net_expected_value > -1.0 || best_prob > 0.05
             }
+            b if b < 10.0 => {
+                // Weak: draw with any positive expectation
+                net_expected_value > 0.0 || (best_prob > 0.10)
+            }
+            b if b < 15.0 => {
+                // Medium-weak: draw with modest positive value
+                net_expected_value > 0.5 || (best_prob > 0.20)
+            }
+            b if b < 20.0 => {
+                // Medium: draw with good value
+                net_expected_value > 1.0 || (best_prob > 0.45 && best_improvement > 2.5)
+            }
+            _ => {
+                // Strong: draw with excellent value
+                net_expected_value > 2.0 || (best_prob > 0.5 && best_improvement > baseline * 0.15)
+            }
+        };
+
+        if should_draw && best_rounds > 0 {
+            let worst_card = self.find_worst_card_to_discard();
+            let expected_score = baseline + best_improvement;
+
+            return AutoPlayDecision {
+                action: PlayAction::Draw,
+                confidence: 0.65 + (best_prob * 0.25), // Moderate confidence scaling
+                expected_score,
+                card_to_discard: Some(worst_card),
+            };
         }
 
-        // Aggressive: Only play if the probabilities really don't favor drawing
+        // No probability data but weak hand
+        if prob_analysis.round_probabilities.is_empty() && baseline < 8.0 {
+            let worst_card = self.find_worst_card_to_discard();
+            return AutoPlayDecision {
+                action: PlayAction::Draw,
+                confidence: 0.6,
+                expected_score: baseline + 3.0,
+                card_to_discard: Some(worst_card),
+            };
+        }
+
         AutoPlayDecision {
             action: PlayAction::Play,
             confidence: 0.7,
@@ -1031,67 +1517,135 @@ impl Node {
         }
     }
 
-    fn balanced_decision(
+    fn aggressive_decision(
         &self,
         baseline: f64,
-        draw_expected_score: f64,
-        prob_analysis: &HandProbabilityAnalysis
+        _draw_expected_score: f64,
+        prob_analysis: &HandProbabilityAnalysis,
     ) -> AutoPlayDecision {
-        if prob_analysis.round_probabilities.len() > 1 {
-            let round_1 = &prob_analysis.round_probabilities[1];
-        
-            // Balanced: Make decision based on risk-adjusted expected value
-            let risk_penalty = round_1.risk_of_degradation * baseline * 0.6; // Moderate risk aversion
-            let net_expected_value = round_1.expected_improvement - risk_penalty;
-        
-            // Also consider the probability of improvement vs. the current baseline
-            let improvement_ratio = if baseline > 0.0 {
-                round_1.expected_improvement / baseline
-            } else {
-                round_1.expected_improvement // Any improvement is good if baseline is 0
-            };
-        
-            // Balanced thresholds based on probabilities
-            let should_draw = 
-                // Good expected value after risk adjustment
-                net_expected_value > 1.0 ||
-                // Decent chance of improvement with meaningful gain
-                (round_1.probability_of_improvement > 0.5 && improvement_ratio > 0.2) ||
-                // Low baseline with reasonable improvement prospects
-                (baseline < 5.0 && round_1.expected_improvement > 2.0) ||
-                // High probability of any improvement when current hand is weak
-                (baseline < 2.0 && round_1.probability_of_improvement > 0.6);
-        
-            if should_draw {
-                let worst_card = self.find_worst_card_to_discard();
-                return AutoPlayDecision {
-                    action: PlayAction::Draw,
-                    confidence: 0.75,
-                    expected_score: draw_expected_score,
-                    card_to_discard: Some(worst_card),
-                };
-            }
+        // Analyze both rounds with minimal risk aversion
+        let round_1_analysis = if prob_analysis.round_probabilities.len() > 1 {
+            let r1 = &prob_analysis.round_probabilities[1];
+            let risk_adjusted = r1.expected_improvement - (r1.risk_of_degradation * baseline * 0.2);
+            let max_potential = r1
+                .improvements
+                .first()
+                .map(|o| o.final_score as f64)
+                .unwrap_or(baseline);
+            Some((
+                risk_adjusted,
+                r1.probability_of_improvement,
+                r1.expected_improvement,
+                max_potential,
+            ))
         } else {
-            // No probability data: estimate based on hand characteristics
+            None
+        };
+
+        let round_2_analysis = if prob_analysis.round_probabilities.len() > 2 {
+            let r2 = &prob_analysis.round_probabilities[2];
+            let risk_adjusted =
+                r2.expected_improvement - (r2.risk_of_degradation * baseline * 0.25);
+            let max_potential = r2
+                .improvements
+                .first()
+                .map(|o| o.final_score as f64)
+                .unwrap_or(baseline);
+            Some((
+                risk_adjusted,
+                r2.probability_of_improvement,
+                r2.expected_improvement,
+                max_potential,
+            ))
+        } else {
+            None
+        };
+        let round_3_analysis = if prob_analysis.round_probabilities.len() > 3 {
+            let r3 = &prob_analysis.round_probabilities[3];
+            let risk_penalty = r3.risk_of_degradation * baseline * 0.6; // Slightly higher for 3 draws
+            let max_potential = r3
+                .improvements
+                .first()
+                .map(|o| o.final_score as f64)
+                .unwrap_or(baseline);
+            Some((
+                r3.expected_improvement - risk_penalty,
+                r3.probability_of_improvement,
+                r3.expected_improvement,
+                max_potential,
+            ))
+        } else {
+            None
+        };
+
+        // Weight both options (60% weight on round 1, 40% on round 2, 30% on round 3 for balanced approach)
+        let (net_expected_value, best_prob, best_improvement, max_potential, best_rounds) =
+            match (round_1_analysis, round_2_analysis, round_3_analysis) {
+                (
+                    Some((r1_val, r1_prob, r1_imp, r1_max)),
+                    Some((r2_val, r2_prob, r2_imp, r2_max)),
+                    Some((r3_val, r3_prob, r3_imp, r3_max)),
+                ) => {
+                    let weighted_value = (r1_val * 0.6) + (r2_val * 0.4) + (r3_val * 0.3);
+                    if r3_max > (((r2_max * 1.2) + (r1_max * 1.2)) / 2.0) {
+                        // Prefer round 3 if significantly better
+                        (r3_val, r3_prob, r3_imp, r3_max, 2)
+                    } else if r2_max > r1_max * 1.2 || r2_val > r1_val {
+                        // Prefer round 2 if significantly better
+                        (r2_val, r2_prob, r2_imp, r2_max, 2)
+                    } else {
+                        (weighted_value, r1_prob, r1_imp, r1_max, 1)
+                    }
+                }
+                (Some((r1_val, r1_prob, r1_imp, r1_max)), None, None) => {
+                    (r1_val, r1_prob, r1_imp, r1_max, 1)
+                }
+                _ => (0.0, 0.0, 0.0, 0.0, 0),
+            };
+
+        // Calculate upside multiplier based on max potential
+        let upside_multiplier = if max_potential > baseline * 2.0 {
+            1.5
+        } else {
+            1.0
+        };
+
+        // Aggressive: very low bar for drawing
+        let should_draw = best_prob > 0.2 || // Low probability threshold
+            net_expected_value * upside_multiplier > -0.5 || // Accept small expected losses
+            max_potential > baseline * 1.5 || // Good upside potential
+            (baseline < 10.0 && best_improvement > 0.5); // Weak hand with any improvement
+
+        if should_draw && best_rounds > 0 {
+            let worst_card = self.find_worst_card_to_discard();
+            // Aggressive players are optimistic about outcomes
+            let expected_score = baseline + (best_improvement * 1.2).max(max_potential * 0.3);
+
+            return AutoPlayDecision {
+                action: PlayAction::Draw,
+                confidence: 0.7 + (best_prob * 0.2), // High base confidence
+                expected_score,
+                card_to_discard: Some(worst_card),
+            };
+        }
+
+        // No probability data: aggressive players still draw unless hand is strong
+        if prob_analysis.round_probabilities.is_empty() && baseline < 20.0 {
             let estimated_potential = self.estimate_hand_potential();
-            let potential_ratio = estimated_potential / baseline.max(1.0);
-        
-            // Balanced players draw if estimated potential is reasonably high
-            if potential_ratio > 0.4 {
+            if estimated_potential > baseline * 0.3 {
                 let worst_card = self.find_worst_card_to_discard();
                 return AutoPlayDecision {
                     action: PlayAction::Draw,
                     confidence: 0.6,
-                    expected_score: baseline + estimated_potential,
+                    expected_score: baseline + estimated_potential * 1.5, // Optimistic estimate
                     card_to_discard: Some(worst_card),
                 };
             }
         }
 
-        // Balanced: Play the current hand if drawing doesn't look promising
         AutoPlayDecision {
             action: PlayAction::Play,
-            confidence: 0.7,
+            confidence: 0.65, // Lower confidence when forced to play
             expected_score: baseline,
             card_to_discard: None,
         }
@@ -1101,59 +1655,57 @@ impl Node {
     fn estimate_hand_potential(&self) -> f64 {
         let cards = &self.full_hand.cards;
         let mut potential = 0.0;
-    
+
         // Count pairs, near-straights, near-flushes, etc.
         let mut rank_counts = std::collections::HashMap::new();
         let mut suit_counts = std::collections::HashMap::new();
-    
+
         for card in cards {
             *rank_counts.entry(card.rank).or_insert(0) += 1;
             *suit_counts.entry(card.suite).or_insert(0) += 1;
         }
-    
+
         // Potential from pairs (cards that could form pairs/trips)
         for count in rank_counts.values() {
             match count {
                 1 => potential += 1.0, // Could form a pair
                 2 => potential += 3.0, // Could form three of a kind
-                _ => {} 
+                _ => {}
             }
         }
-    
+
         // Potential from flushes
         for count in suit_counts.values() {
             if *count >= 3 {
                 potential += (*count as f64) * 1.5; // More cards of same suit = more flush potential
             }
         }
-    
+
         // Potential from straights (simplified - check for gaps)
-        let mut ranks: Vec<u64> = cards.iter()
-            .map(|c| c.rank.to_u64().unwrap_or(0))
-            .collect();
+        let mut ranks: Vec<u64> = cards.iter().map(|c| c.rank.to_u64().unwrap_or(0)).collect();
         ranks.sort();
         ranks.dedup();
-    
+
         let mut consecutive_count = 1;
         let mut max_consecutive = 1;
         for i in 1..ranks.len() {
-            if ranks[i] == ranks[i-1] + 1 {
+            if ranks[i] == ranks[i - 1] + 1 {
                 consecutive_count += 1;
                 max_consecutive = max_consecutive.max(consecutive_count);
             } else {
                 consecutive_count = 1;
             }
         }
-    
+
         if max_consecutive >= 3 {
             potential += max_consecutive as f64 * 2.0;
         }
-    
+
         potential
     }
 
     /// Find the worst card to discard based on strategic analysis
-    fn find_worst_card_to_discard(&self) -> Card {
+    pub fn find_worst_card_to_discard(&self) -> Card {
         let dummy_prob_analysis = HandProbabilityAnalysis {
             current_baseline: self.baseline_score,
             round_probabilities: vec![],
