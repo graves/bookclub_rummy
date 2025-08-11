@@ -17,6 +17,7 @@ pub struct Hand {
 #[derive(Clone, Debug)]
 pub struct Player {
     pub name: String,
+    pub description: String,
     pub player_type: Option<PlayerType>,
     pub hand: Hand,
     pub actions: VecDeque<ActionHistory>,
