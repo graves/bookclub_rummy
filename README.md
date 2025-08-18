@@ -1,17 +1,5 @@
 # Bookclub Rummy
 
-```
-  _ _ _ _ ___ ___ _ _ _ ___ _ _ _________
- |A|Q|1|5|4  |7  |J|1|9|7  |A|K|2        |
- |@|@|@|@|@  |## |O|O|O|OO |+|+|+        |
- | | | | | @ |   | | | |   | | |    +    |
- | | | | |   | # | | | | O | | |         |
- | | | | | @ |   | | | |   | | |    +    |
- | | | | |   | # | | | | O | | |        +|
- | | | | |   |   | | | |   | | |        Z|
-  ~ ~ ~ ~ ~~~ ~~~ ~ ~ ~ ~~~ ~ ~ ~~~~~~~~~
-```
-
 Play Five Card Rummy in your terminal and chat with your fake homies (about books preferably!)
 
 ![Bookclub Rummy playthrough screenshot](./bookclub_rummy.JPG)
