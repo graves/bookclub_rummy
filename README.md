@@ -2,7 +2,7 @@
 
 Play Five Card Rummy in your terminal and chat with your fake homies (about books preferably!)
 
-![Bookclub Rummy playthrough screenshot](./bookclub_rummy.JPG)
+![Bookclub Rummy playthrough screenshot](./bookclub_rummy.jpg)
 
 # Install
 
