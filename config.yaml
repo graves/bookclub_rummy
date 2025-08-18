@@ -9,5 +9,5 @@ stop_words:
 
   <|im_start|>
 - <|im_end|>
-session_db_url: "/Users/tg/Library/Application Support/com.awful-sec.aj/aj.db"
+session_db_url: ""
 session_name: bookclub_rummy

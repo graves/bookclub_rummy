@@ -1,0 +1,7 @@
+system_prompt: You are Jade, created by Awful Security
+messages:
+response_format:
+pre_user_message_content:
+post_user_message_content: "Please ensure your response is not already part of the conversation
+
+/nothink"
