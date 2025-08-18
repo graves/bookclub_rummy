@@ -1,7 +1,8 @@
 use crate::card::Card;
 use rand::prelude::SliceRandom;
 use rand::rng;
-use std::collections::VecDeque;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct Deck<'a> {
@@ -22,6 +23,7 @@ pub struct Player {
     pub hand: Hand,
     pub actions: VecDeque<ActionHistory>,
     pub dialogue: VecDeque<String>,
+    pub score: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -33,8 +35,9 @@ pub enum PlayerType {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayAction {
-    Draw, // Draw one card (discard one card)
-    Play, // Play the current hand
+    Draw,     // Draw one card (discard one card)
+    Play,     // Play the current hand
+    Retrieve, // Draw from the discard pil
 }
 
 #[derive(Clone, Debug)]
@@ -51,39 +54,17 @@ pub struct ActionHistory {
     pub card_to_discard: Option<Card>, // Which card to discard if drawing
 }
 
-pub struct World {
-    pub players: Vec<Player>,
-    pub you: Player,
-}
-
 #[derive(Clone, Debug)]
 pub enum Choice {
     Draw,
     Play,
-    Fold,
+    Retrieve,
 }
 
 impl PartialEq for Player {
     fn eq(&self, other: &Self) -> bool {
         // Only compare the "name" field
         self.name == other.name
-    }
-}
-
-impl World {
-    pub fn print(&self) {
-        let blank_drawn_card_chars = "";
-        let drawn_card_chars = " | Q♢";
-        let your_hand = &self.you.hand;
-
-        println!("Socrates says:       I am not annoying to those who can annoy.");
-        println!("W.E.B. Du Bois says: I invented sociology and nobody talks about it.");
-        println!(
-            "Thomas Sankara says: If you forget what Burkina Faso means one more time, I'm making you move to Africa to continue the liberation of our women."
-        );
-        println!("");
-        println!("[10♧] [⌧]");
-        println!("{your_hand}{blank_drawn_card_chars}")
     }
 }
 
@@ -117,30 +98,44 @@ pub fn shuffle_deck() -> Result<VecDeque<Card>, String> {
     Ok(VecDeque::from(deck))
 }
 
+type PlayersAndPiles = (Vec<Player>, VecDeque<Card>, VecDeque<Card>);
+
 /// Deals 5 cards to each player from the deck.
 pub fn deal_cards<'a>(
     mut players: Vec<Player>,
-    deck: &'a mut Deck<'a>,
-) -> Result<(Vec<Player>, &'a mut Deck<'a>), String> {
+    deck: RefCell<&mut Deck<'a>>,
+) -> Result<PlayersAndPiles, String> {
     for _ in 0..5 {
         for player in players.iter_mut() {
-            let card = deck.draw_pile.pop_back().ok_or("Deck is empty")?;
+            let card = deck
+                .borrow_mut()
+                .draw_pile
+                .pop_back()
+                .ok_or("Deck is empty")?;
             player.hand.cards.push(card);
         }
     }
 
-    Ok((players, deck))
+    let draw_pile = deck
+        .borrow_mut()
+        .draw_pile
+        .iter()
+        .copied()
+        .collect::<VecDeque<Card>>();
+    let discard_pile = deck
+        .borrow_mut()
+        .discard_pile
+        .iter()
+        .copied()
+        .collect::<VecDeque<Card>>();
+
+    Ok((players, draw_pile, discard_pile))
 }
 
 /// Calculates the best possible meld score from a 6-card hand by trying all 5-card combinations
-pub fn calculate_best_meld_from_hand(hand: &Hand) -> u64 {
+pub fn calculate_best_meld_from_hand(hand: &Hand) -> (u64, Hand) {
     use crate::scoring::{CardVec, MELD_FUNCTIONS};
-
-    if hand.cards.len() < 5 {
-        return 0;
-    }
-
-    let mut best_score = 0;
+    let mut score_to_hand = HashMap::new();
 
     // Try all possible 5-card combinations from the 6-card hand
     for skip_idx in 0..hand.cards.len() {
@@ -152,17 +147,51 @@ pub fn calculate_best_meld_from_hand(hand: &Hand) -> u64 {
         }
 
         if five_card_hand.len() == 5 {
-            let hand_score = MELD_FUNCTIONS
-                .iter()
-                .filter_map(|&meld_fn| meld_fn(five_card_hand.clone()).ok())
-                .max()
-                .unwrap_or(0);
-
-            best_score = best_score.max(hand_score);
+            for meld_fn in MELD_FUNCTIONS {
+                let score = meld_fn(five_card_hand.clone());
+                score_to_hand
+                    .entry(score)
+                    .or_insert_with(|| five_card_hand.clone());
+            }
         }
     }
 
-    best_score
+    if let Some((best_score, high_hand)) = score_to_hand.iter().max_by_key(|(score, _)| *score) {
+        match best_score {
+            Ok(score) => {
+                let mut card_vec = Vec::new();
+                for card in high_hand {
+                    card_vec.push(*card);
+                }
+                let hand = Hand { cards: card_vec };
+
+                return (*score, hand);
+            }
+            _ => return (0, hand.clone()),
+        }
+    }
+
+    (0, hand.clone())
+}
+
+pub fn calculate_best_meld_from_5_card_hand(hand: &Hand) -> (u64, Hand) {
+    use crate::scoring::{CardVec, MELD_FUNCTIONS};
+
+    let mut best_score = 0;
+    let mut five_card_hand = CardVec::new();
+
+    for card in &hand.cards {
+        five_card_hand.push(*card);
+    }
+
+    for meld_fn in MELD_FUNCTIONS {
+        let score = meld_fn(five_card_hand.clone()).unwrap();
+        if score > best_score {
+            best_score = score;
+        }
+    }
+
+    (best_score, hand.clone())
 }
 
 impl<'a> Deck<'a> {

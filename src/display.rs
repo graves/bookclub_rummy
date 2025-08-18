@@ -1,18 +1,7 @@
 use crate::analysis::{HandProbabilityAnalysis, RoundProbabilities};
-use crate::card::Card;
+use crate::card::{Card, Suite};
 use crate::game::Hand;
 use std::fmt;
-
-impl fmt::Display for Card {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}{}",
-            self.name.to_string().unwrap(),
-            self.suite.to_char().unwrap()
-        )
-    }
-}
 
 impl fmt::Display for Hand {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -24,6 +13,25 @@ impl fmt::Display for Hand {
     }
 }
 
+impl fmt::Display for Card {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let name_string = self.name.to_string().map_err(|_| fmt::Error)?;
+        let suite_char = self.suite.to_char().map_err(|_| fmt::Error)?;
+
+        let colored_output = match self.suite {
+            Suite::Hearts | Suite::Diamonds => {
+                format!("\x1B[31m{name_string}{suite_char}\x1B[0m") // Red
+            }
+            Suite::Spades | Suite::Clubs => {
+                // Light pastel brown using 256-color palette
+                format!("\x1B[38;5;180m{name_string}{suite_char}\x1B[0m")
+            }
+        };
+
+        write!(f, "{colored_output}")
+    }
+}
+
 impl fmt::Display for RoundProbabilities {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let round_description = match self.round {
@@ -31,7 +39,7 @@ impl fmt::Display for RoundProbabilities {
             1 => "After 1st Draw".to_string(),
             2 => "After 2nd Draw".to_string(),
             3 => "After 3rd Draw".to_string(),
-            n => format!("After {}th Draw", n),
+            n => format!("After {n}th Draw"),
         };
 
         writeln!(
@@ -83,11 +91,7 @@ impl fmt::Display for HandProbabilityAnalysis {
         )?;
 
         if let Some(optimal_round) = self.optimal_stop_round {
-            writeln!(
-                f,
-                "Recommended strategy: Stop after round {}",
-                optimal_round
-            )?;
+            writeln!(f, "Recommended strategy: Stop after round {optimal_round}")?;
         }
 
         writeln!(f)?;
@@ -104,7 +108,7 @@ impl fmt::Display for HandProbabilityAnalysis {
 
         writeln!(f)?;
         for round_prob in &self.round_probabilities {
-            writeln!(f, "{}", round_prob)?;
+            writeln!(f, "{round_prob}")?;
         }
 
         Ok(())

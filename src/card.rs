@@ -86,12 +86,12 @@ impl Card {
         let name_string = input;
 
         if !allowed_suites.contains(&suite_char) {
-            let err_msg = "{suite_char} does not match any known suite!";
+            let err_msg = format!("{suite_char} does not match any known suite!");
             return Err(err_msg.to_string());
         }
 
         if !allowed_names.contains(&name_string.as_str()) {
-            let err_msg = "{name_string} does not match any known card name!";
+            let err_msg = format!("{name_string} does not match any known card name!");
             return Err(err_msg.to_string());
         }
 
@@ -106,6 +106,10 @@ impl Card {
     pub fn to_string(&self) -> Result<String, String> {
         let name_string = self.name.to_string()?;
         let suite_char = self.suite.to_char()?;
+
+        if self.suite == Suite::Hearts || self.suite == Suite::Diamonds {
+            return Ok(format!("{name_string}{suite_char}"));
+        };
 
         Ok(format!("{name_string}{suite_char}"))
     }

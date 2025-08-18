@@ -129,7 +129,7 @@ pub fn evaluate_hand(node: &mut Node) -> Result<&mut Node, String> {
         // Calculate meld scores efficiently
         meld_scores.clear();
         for &meld_fn in MELD_FUNCTIONS {
-            if let Some(score) = meld_fn(new_hand.clone()).ok() {
+            if let Ok(score) = meld_fn(new_hand.clone()) {
                 meld_scores.push(score);
             }
         }
@@ -204,7 +204,7 @@ pub fn evaluate_branches(
         let new_hand = Hand {
             cards: simulated_hand.to_vec(),
         };
-        let branch_baseline = calculate_best_meld_from_hand(&new_hand);
+        let (branch_baseline, _hand) = calculate_best_meld_from_hand(&new_hand);
 
         // USE parent_baseline: Skip branches that can't improve
         if current_depth > 1 && branch_baseline <= parent_baseline {
@@ -333,7 +333,7 @@ pub fn evaluate_branches_parallel(
             let new_hand = Hand {
                 cards: simulated_hand.to_vec(),
             };
-            let branch_baseline = calculate_best_meld_from_hand(&new_hand);
+            let (branch_baseline, _hand) = calculate_best_meld_from_hand(&new_hand);
 
             // USE parent_baseline: Skip branches that can't improve
             if current_depth > 1 && branch_baseline <= parent_baseline {
@@ -806,8 +806,7 @@ impl Node {
                 round.expected_improvement - risk_penalty_balanced + certainty_bonus;
 
             println!(
-                "Round {}: Conservative={:.2}, Aggressive={:.2}, Balanced={:.2}",
-                i, conservative_score, aggressive_score, balanced_score
+                "Round {i}: Conservative={conservative_score:.2}, Aggressive={aggressive_score:.2}, Balanced={balanced_score:.2}"
             );
 
             if conservative_score > best_conservative.1 {
@@ -837,10 +836,7 @@ impl Node {
             best_aggressive.0
         );
         println!("  Balanced player: Stop after round {}", best_balanced.0);
-        println!(
-            "  Overall recommendation: Stop after round {} (conservative)",
-            optimal_round
-        );
+        println!("  Overall recommendation: Stop after round {optimal_round} (conservative)");
 
         (optimal_round, decision_analysis)
     }
@@ -909,6 +905,7 @@ impl Node {
         })
     }
 
+    #[warn(clippy::collapsible_if)]
     fn collect_direct_outcomes_at_depth(
         &self,
         current_depth: usize,
@@ -1046,7 +1043,8 @@ impl Node {
             let hand_without_target = Hand {
                 cards: remaining_cards,
             };
-            calculate_best_meld_from_hand(&hand_without_target)
+            let (score, _hand) = calculate_best_meld_from_hand(&hand_without_target);
+            score
         } else {
             0
         }
@@ -1192,7 +1190,7 @@ impl Node {
 
         let hand_strength_threshold = 20;
         if baseline >= hand_strength_threshold {
-            reasoning.push(format!("Strong current hand (score {})", baseline));
+            reasoning.push(format!("Strong current hand (score {baseline})"));
         }
 
         let should_continue = if prob_analysis.round_probabilities.len() > 1 {
@@ -1275,6 +1273,7 @@ impl Node {
         }
     }
 
+    #[warn(clippy::redundant_guards)]
     fn conservative_decision(
         &self,
         baseline: f64,
@@ -1744,8 +1743,30 @@ impl Node {
                     deck.discard_pile.push_back(worst_card);
 
                     // Calculate final score with the new 5-card hand
-                    self.baseline_score =
+                    let (score, _hand) =
                         crate::game::calculate_best_meld_from_hand(&self.full_hand);
+                    self.baseline_score = score;
+                    Ok(self.baseline_score)
+                } else {
+                    Err("No cards left in deck".to_string())
+                }
+            }
+            PlayAction::Retrieve => {
+                // Draw one card
+                if let Some(new_card) = deck.discard_pile.pop_back() {
+                    self.full_hand.cards.push(new_card);
+
+                    // Find worst card to discard from the now 6-card hand
+                    let worst_card = self.find_worst_card_to_discard();
+
+                    // Discard it
+                    self.full_hand.cards.retain(|&card| card != worst_card);
+                    deck.discard_pile.push_back(worst_card);
+
+                    // Calculate final score with the new 5-card hand
+                    let (score, _hand) =
+                        crate::game::calculate_best_meld_from_hand(&self.full_hand);
+                    self.baseline_score = score;
                     Ok(self.baseline_score)
                 } else {
                     Err("No cards left in deck".to_string())
@@ -1757,7 +1778,7 @@ impl Node {
     /// Debug function that prints comprehensive analysis of the current hand
     pub fn debug_advanced_round_statistics(&self) {
         let prob_analysis = self.calculate_realistic_probabilities();
-        println!("{}", prob_analysis);
+        println!("{prob_analysis}");
 
         // Strategic analysis based on future meld potential
         println!("\n=== Strategic Card Analysis (Future-Based) ===");
@@ -1793,7 +1814,7 @@ impl Node {
         if !play_decision.alternative_strategies.is_empty() {
             println!("Alternative strategies:");
             for strategy in &play_decision.alternative_strategies {
-                println!("  - {}", strategy);
+                println!("  - {strategy}");
             }
         }
 
@@ -1808,18 +1829,21 @@ impl Node {
         for player_type in &player_types {
             let decision = self.make_autoplay_decision(player_type.clone(), &prob_analysis);
 
-            println!("\n{:?} Player:", player_type);
+            println!("\n{player_type:?} Player:");
             println!("  Decision: {:?}", decision.action);
             println!("  Confidence: {:.1}%", decision.confidence * 100.0);
             println!("  Expected Score: {:.1}", decision.expected_score);
 
             if let Some(card) = decision.card_to_discard {
-                println!("  Card to discard: {}", card);
+                println!("  Card to discard: {card}");
             }
 
             match decision.action {
                 PlayAction::Play => println!("  → Will play current hand"),
                 PlayAction::Draw => println!("  → Will draw one card and discard worst card"),
+                PlayAction::Retrieve => {
+                    println!("  → Will retrieve the discard and discard worst card")
+                }
             }
         }
     }
