@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use rand::Rng;
 use rand::seq::SliceRandom;
+use regex::Regex;
 use terminal_size::{Width, terminal_size};
 
 use rummy::{analysis::*, card::*, game::*};
@@ -458,6 +459,7 @@ impl GameState {
         };
 
         self.actions_log.borrow_mut().push(action_text);
+
         if self.actions_log.borrow().len() > 6 {
             self.actions_log.borrow_mut().remove(0);
         }
@@ -482,10 +484,25 @@ impl GameState {
         let answer = awful_aj::api::ask(&self.aj_config, question, &template, None, None)
             .await
             .unwrap();
+        let answer = self.strip_think_blocks(&answer);
 
         let name_prompt = format!("{name}: ");
 
         answer.replace(&name_prompt, "")
+    }
+
+    fn strip_think_blocks(&self, s: &str) -> String {
+        // (?is) -> case-insensitive + dot matches newlines
+        // Allow spaces and optional attributes inside the opening tag
+        // and optional spaces inside the closing tag.
+        let re = Regex::new(r"(?is)<\s*think\b[^>]*>.*?<\s*/\s*think\s*>").unwrap();
+        let cleaned = re.replace_all(s, "");
+        // also collapse any excessive blank lines that may be left behind
+        let re_blank = Regex::new(r"\n{3,}").unwrap();
+        re_blank
+            .replace_all(cleaned.as_ref(), "\n\n")
+            .trim()
+            .to_string()
     }
 
     fn clear_messages(&self) {
@@ -1068,6 +1085,7 @@ async fn main() {
             };
 
             let retrieve_prob_analysis = retrieve_node.calculate_cumulative_probabilities();
+
             let retrieve_decision =
                 retrieve_node.make_autoplay_decision(player_type.clone(), &retrieve_prob_analysis);
 

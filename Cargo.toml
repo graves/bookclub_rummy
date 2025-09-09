@@ -14,3 +14,4 @@ awful_aj = { version = "*", git = "https://github.com/graves/awful_aj" }
 clap = { version = "4.5.38", features = ["derive"] }
 tokio = { version = "1.45.0", features = ["full"] }
 terminal_size = "0.4.3"
+regex = "1.11.2"

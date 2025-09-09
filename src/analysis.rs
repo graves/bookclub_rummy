@@ -209,7 +209,7 @@ pub fn evaluate_branches(
         // USE parent_baseline: Skip branches that can't improve
         if current_depth > 1 && branch_baseline <= parent_baseline {
             // This branch won't improve our position, skip expensive recursion
-            return Ok(());
+            continue;
         }
 
         // Create branch with minimal cloning
@@ -221,7 +221,7 @@ pub fn evaluate_branches(
             possible_cards: branch_available_cards,
             discard_pile: branch_discard_pile,
             meld_score: max_meld_score,
-            baseline_score: 0,
+            baseline_score: branch_baseline,
             branches: Vec::new(),
             depth: node.depth + 1,
         };
